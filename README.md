@@ -30,6 +30,8 @@ The firmware is based on the [Keyberon library](https://github.com/TeXitoi/keybe
 - CapsLock & NumLock
 - RGB underglow on per key basis
 - Switch to bootloader mode to easily upgrade firmware by pressing a key combination
+- Auto-mouse mode: some keys act as mouse keys after the trackball has been
+  used
 
 ## On CapsLock & NumLock support
 

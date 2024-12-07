@@ -15,15 +15,15 @@ use utils::serde::Event;
 
 /// Basic layout for the keyboard
 #[cfg(feature = "keymap_basic")]
-use crate::keymap_basic::{KBLayout, LAYERS};
+use crate::keymap_basic::{KBLayout, LAYERS, NB_LAYERS};
 
 /// Keymap by Boris Faure
 #[cfg(feature = "keymap_borisfaure")]
-use crate::keymap_borisfaure::{KBLayout, LAYERS};
+use crate::keymap_borisfaure::{KBLayout, LAYERS, NB_LAYERS};
 
 /// Test layout for the keyboard
 #[cfg(feature = "keymap_test")]
-use crate::keymap_test::{KBLayout, LAYERS};
+use crate::keymap_test::{KBLayout, LAYERS, NB_LAYERS};
 
 /// Layout refresh rate, in ms
 const REFRESH_RATE_MS: u64 = 1;
@@ -56,6 +56,18 @@ pub enum CustomEvent {
 
 /// Debug tick counter: every 5s
 const TICK_DEBUG: usize = 5000;
+/// Timeout for the automouse feature: when the mouse is not used for this
+/// amount of time, it will be considered inactive.
+const AUTO_MOUSE_TIMEOUT: usize = 1000;
+
+/// Check if the key event is a left click
+fn event_is_left_click(i: u8, j: u8) -> bool {
+    i == 3 && j == 5
+}
+/// Check if the key event is a right click
+fn event_is_right_click(i: u8, j: u8) -> bool {
+    i == 3 && j == 6
+}
 
 /// Core keyboard/mouse handler
 pub struct Core<'a> {
@@ -71,6 +83,15 @@ pub struct Core<'a> {
     hid_mouse_writer: HidWriter<'a, Driver<'a, USB>, 7>,
     /// Tick counter
     tick: usize,
+    /// Timeout for the automouse feature. When this is non-zero, the mouse
+    /// will be considered active. Goes down to 0 every tick.
+    auto_mouse_timeout: usize,
+    /// Need to filter next left click release
+    filter_left_button_release: bool,
+    /// Need to filter next right click release
+    filter_right_button_release: bool,
+    /// Current color layer
+    current_color_layer: u8,
 }
 
 impl<'a> Core<'a> {
@@ -83,11 +104,16 @@ impl<'a> Core<'a> {
             mouse: MouseHandler::new(),
             hid_mouse_writer,
             tick: TICK_DEBUG,
+            auto_mouse_timeout: 0,
+            filter_left_button_release: false,
+            filter_right_button_release: false,
+            current_color_layer: 0,
         }
     }
 
     /// Set the color layer of the RGB LEDs
     async fn set_color_layer(&mut self, layer: u8) {
+        self.current_color_layer = layer;
         if SIDE_CHANNEL.is_full() {
             defmt::error!("Side channel is full");
         }
@@ -98,10 +124,41 @@ impl<'a> Core<'a> {
         ANIM_CHANNEL.send(AnimCommand::ChangeLayer(layer)).await;
     }
 
-    /// On key event
+    /// Process a key event
     fn on_key_event(&mut self, event: KBEvent) {
-        defmt::info!("Event: {:?}", defmt::Debug2Format(&event));
-        self.layout.event(event);
+        let (i, j) = event.coord();
+        let is_press = event.is_press();
+        defmt::info!(
+            "Key event: {:?} {:?} auto_mouse_timeout: {}, filter_left_button_release: {}, filter_right_button_release: {}",
+            is_press,
+            (i, j),
+            self.auto_mouse_timeout,
+            self.filter_left_button_release,
+            self.filter_right_button_release
+        );
+        if self.auto_mouse_timeout > 0 {
+            self.auto_mouse_timeout -= 1;
+            if event_is_left_click(i, j) {
+                self.mouse.on_left_click(is_press);
+                self.filter_left_button_release = is_press;
+                self.auto_mouse_timeout = AUTO_MOUSE_TIMEOUT;
+            } else if event_is_right_click(i, j) {
+                self.mouse.on_right_click(is_press);
+                self.filter_right_button_release = is_press;
+                self.auto_mouse_timeout = AUTO_MOUSE_TIMEOUT;
+            } else {
+                // Not a mouse event, process it as a keyboard event
+                // and consider the mouse as inactive
+                self.auto_mouse_timeout = 0;
+                self.layout.event(event);
+            }
+        } else if self.filter_left_button_release && !is_press && event_is_left_click(i, j) {
+            self.filter_left_button_release = false;
+        } else if self.filter_right_button_release && !is_press && event_is_right_click(i, j) {
+            self.filter_right_button_release = false;
+        } else {
+            self.layout.event(event);
+        }
     }
 
     /// Process the state of the keyboard and mouse
@@ -119,6 +176,16 @@ impl<'a> Core<'a> {
             let raw = mouse_report.serialize();
             if let Err(e) = self.hid_mouse_writer.write(&raw).await {
                 defmt::error!("Failed to send mouse report: {:?}", e);
+            }
+            self.auto_mouse_timeout = AUTO_MOUSE_TIMEOUT;
+        }
+        if self.auto_mouse_timeout > 0 {
+            self.auto_mouse_timeout -= 1;
+            if self.auto_mouse_timeout == 0 {
+                self.set_color_layer(self.current_layer as u8).await;
+            }
+            if self.current_color_layer != NB_LAYERS as u8 {
+                self.set_color_layer(NB_LAYERS as u8).await;
             }
         }
 
